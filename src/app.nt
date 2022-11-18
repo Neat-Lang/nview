@@ -1,0 +1,382 @@
+module app;
+
+macro import gtk;
+macro import std.macro.assert;
+macro import std.macro.cimport;
+
+import c_header("dirent.h");
+import c_header("gdk/gdkkeysyms.h");
+import std.algorithm;
+import std.stdio;
+import std.string;
+import std.thread;
+import gtk;
+
+void main(string[] args) {
+    if (args.length == 1) return;
+    mut string[] paths;
+    for (entry in args[1].readDir) {
+        auto path = "$(args[1])/$(entry.name)";
+        paths ~= path;
+        print(path);
+    }
+    paths = paths.sort((a, b) => naturalSmaller(a, b));
+    print("$(paths)");
+    gtk_init(null, null);
+
+    auto loader = new LazyPixbufLoader;
+
+    GtkCssProvider *provider = gtk_css_provider_new;
+    auto style = "
+        .selected {
+            border: 3px solid black;
+        }
+        frame {
+            border: 3px solid white;
+        }";
+    gtk_css_provider_load_from_data(provider, style.toStringz, -1, null);
+    gtk_style_context_add_provider_for_screen(gdk_screen_get_default, cast(GtkStyleProvider*) provider,
+        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+
+    auto window = Window.new(GTK_WINDOW_TOPLEVEL);
+    window.setTitle("nview");
+
+    auto pic = Image.new;
+
+    auto picScroll = ScrolledWindow.new(null, null);
+    picScroll.add(pic);
+    // window.add(picScroll);
+    g_object_ref(cast(void*) picScroll);
+
+    auto grid = Grid.new;
+    grid.setRowHomogeneous(true);
+
+    auto gridEventBox = EventBox.new;
+    gridEventBox.add(grid);
+
+    auto gridScroll = ScrolledWindow.new(null, null);
+    gridScroll.add(gridEventBox);
+    window.add(gridScroll);
+    g_object_ref(cast(void*) gridScroll);
+
+    auto app = new Application(thumbSize=128, pic, grid, gridScroll);
+
+    connectSignal1!(GdkEventButton*)(gridEventBox, "button-press-event", &app.resolveClick);
+    window.setDefaultSize(app.width, app.height);
+
+    for (int i, path in paths) {
+        auto image = Image.new;
+        image.setSizeRequest(app.thumbSize, app.thumbSize);
+        auto file = path.filename;
+        auto frame = Frame.new(toStringz(file[0 .. 12] ~ "..." if file.length > 15 else file));
+        frame.add(image);
+        g_object_ref(cast(void*) frame);
+        auto entry = new FileEntry(path, app, i, frame, image);
+        // FIXME what's going on here? fix rc issue
+        loader.load(path, target=__leak(entry), app.thumbSize, app.thumbSize);
+        app.add(entry);
+    }
+    app.updateGridLayout;
+
+    window.showAll;
+
+    void quit() { gtk_main_quit; }
+    void configure(GdkEventConfigure* event) {
+        // print("configure $(event.width), $(event.height)");
+        app.width = event.width;
+        app.height = event.height;
+        if (app.fullscreen) app.updateImage;
+        else app.updateGridLayout;
+    }
+    void toggleFullscreen() {
+        if (!app.fullscreen) {
+            gridScroll.hide;
+            window.remove(gridScroll);
+            window.add(picScroll);
+            picScroll.showAll;
+            window.fullscreen;
+            app.fullscreen = true;
+            app.updateImage;
+        } else {
+            picScroll.hide;
+            window.remove(picScroll);
+            window.add(gridScroll);
+            gridScroll.showAll;
+            window.unfullscreen;
+            app.fullscreen = false;
+        }
+    }
+    void keypress(GdkEventKey* event) {
+        if (event.keyval == GDK_KEY_f) toggleFullscreen;
+        if (event.keyval == GDK_KEY_Right || event.keyval == GDK_KEY_space) {
+            app.next;
+        }
+        if (event.keyval == GDK_KEY_Left || event.keyval == GDK_KEY_BackSpace) {
+            app.prev;
+        }
+        if (event.keyval == GDK_KEY_Up) app.up;
+        if (event.keyval == GDK_KEY_Down) app.down;
+    }
+    connectSignal0(window, "destroy", &quit);
+    connectSignal1!(GdkEventKey*)(window, "key-press-event", &keypress);
+    connectSignal1!(GdkEventConfigure*)(window, "configure-event", &configure);
+
+    gtk_main;
+}
+
+class Application {
+    int thumbSize;
+    Image image;
+    Grid grid;
+    ScrolledWindow gridScroll;
+
+    FileEntry[] files;
+    int current;
+    bool fullscreen;
+    int width, height;
+    int columns;
+    this(this.thumbSize, this.image, this.grid, this.gridScroll) {
+        this.width = 600;
+        this.height = 500;
+    }
+    void add(FileEntry fileEntry) {
+        files ~= fileEntry;
+    }
+    void setCurrent(int current) {
+        if (!fullscreen)
+            files[this.current].frame.getStyleContext.removeClass("selected");
+        this.current = current;
+        if (fullscreen) updateImage;
+        else with (files[this.current]) {
+            frame.getStyleContext.addClass("selected");
+            GtkAllocation frameRect; frame.getAllocation(&frameRect);
+            GtkAllocation viewRect; gridScroll.getAllocation(&viewRect);
+            auto adjustment = gridScroll.getVAdjustment;
+            if (frameRect.y < adjustment.getValue)
+                adjustment.setValue(frameRect.y);
+            if (frameRect.(y + height) > adjustment.getValue + viewRect.height)
+                adjustment.setValue(frameRect.(y + height) - viewRect.height);
+        }
+    }
+    void updateImage() {
+        assert(fullscreen);
+        print("select $(files[current].path)");
+        auto pixbuf = loadPixbuf(files[current].path, width, height);
+        // FIXME
+        if (cast(void*) pixbuf) {
+            image.setFromPixbuf(pixbuf);
+        }
+    }
+    void resolveClick(GdkEventButton* button) {
+        for (file in files) {
+            GtkAllocation allocation;
+            file.frame.getAllocation(&allocation);
+            if (button.clickedOn(allocation))
+                file.select;
+        }
+    }
+    void updateGridLayout() {
+        int newColumns = width / (thumbSize + 10);
+        if (columns == newColumns) return;
+        if (columns != 0) {
+            for (file in files) {
+                grid.remove(file.frame);
+            }
+        }
+        columns = newColumns;
+        mut int row = 0, col = 0;
+        for (file in files) {
+            grid.attach(file.frame, left=col, top=row, width=1, height=1);
+            if (++col == newColumns) {
+                col = 0;
+                ++row;
+            }
+        }
+    }
+    void next() {
+        setCurrent((current + 1) % cast(int) files.length);
+    }
+    void prev() {
+        setCurrent((current - 1) % cast(int) files.length);
+    }
+    void up() {
+        setCurrent((current - columns) % cast(int) files.length);
+    }
+    void down() {
+        setCurrent((current + columns) % cast(int) files.length);
+    }
+}
+
+class FileEntry {
+    string path;
+    Application app;
+    int offset;
+    Widget frame;
+    Image image;
+    Pixbuf pixbuf;
+    this(this.path, this.app, this.offset, this.frame, this.image) {}
+    void select() {
+        print("select $offset");
+        app.setCurrent(offset);
+    }
+    void setPixbuf(Pixbuf pixbuf) {
+        this.pixbuf = pixbuf;
+        gdk_threads_add_idle(&set_image_pixbuf, cast(void*) this);
+    }
+}
+
+int set_image_pixbuf(void* fileEntry) {
+    auto entry = cast(FileEntry) fileEntry;
+    entry.image.setFromPixbuf(entry.pixbuf);
+}
+
+bool clickedOn(GdkEventButton* button, GtkAllocation allocation)
+{
+    return allocation.(
+        button.x >= x && button.x <= x + width
+        && button.y >= y && button.y <= y + height);
+}
+
+string filename(string path) {
+    return path.split("/")[$ - 1];
+}
+
+alias GTK_STYLE_PROVIDER_PRIORITY_APPLICATION = 600;
+
+class LazyPixbufLoader {
+    (Pixbuf | :loading, FileEntry target)[string] pixbufs;
+    ThreadPool threadPool;
+    Mutex mutex;
+    this() {
+        this.threadPool = new ThreadPool(8);
+        this.mutex = new Mutex;
+    }
+    void load(string path, FileEntry target, int width, int height) {
+        auto key = this.key(path, width, height);
+        with (mutex.locked) {
+            if (!pixbufs.has(key)) {
+                pixbufs[key] = (:loading, target);
+                threadPool.addTask(new LoadPixbuf(this, path, width, height));
+            } else {
+                pixbufs[key].case {
+                    (:loading, FileEntry target):
+                        // TODO verify it's the same entry
+                        return;
+                    Pixbuf pixbuf:
+                        if (cast(void*) pixbuf) {
+                            target.setPixbuf(pixbuf);
+                        }
+                }
+            }
+        }
+    }
+    void resolve(string path, int width, int height, Pixbuf pixbuf) {
+        auto key = this.key(path, width, height);
+        with (mutex.locked) {
+            if (cast(void*) pixbuf) {
+                pixbufs[key].case(Pixbuf buf: die).target.setPixbuf(pixbuf);
+            }
+            pixbufs[key] = pixbuf;
+        }
+    }
+
+    private string key(string path, int width, int height) {
+        return "$path|$width|$height";
+    }
+}
+
+class LoadPixbuf : Task {
+    LazyPixbufLoader loader;
+    string path;
+    int width, height;
+    this(this.loader, this.path, this.width, this.height) {}
+    override void run() {
+        auto pixbuf = loadPixbuf(path, width, height);
+        this.loader.resolve(path, width, height, pixbuf);
+    }
+}
+
+Pixbuf loadPixbuf(string path, int width, int height) {
+    return Pixbuf.newFromFileAtScale(
+        path.toStringz, width, height,
+        preserve_aspect_ratio=true, null);
+}
+
+bool naturalSmaller(mut string left, mut string right) {
+    int offsetLeft = 0, offsetRight = 0;
+    alias Fragment = ((int | char | :empty), string rest);
+    Fragment getFragment(mut string s) {
+        if (s.empty) return (:empty, "");
+        if (!s.front.isDigit) return (s.front, s[1 .. $]);
+        mut int numRes = 0;
+        while (!s.empty && s.front.isDigit) {
+            numRes = numRes * 10 + s.front - "0"[0];
+            s = s.next;
+        }
+        return (numRes, s);
+    }
+    int typeId(Fragment fragment) return fragment[0].case(:empty: 0, int: 1, char: 2);
+    while (true) {
+        auto leftFrag = left.getFragment, rightFrag = right.getFragment;
+        if (leftFrag.typeId < rightFrag.typeId) return true;
+        if (leftFrag.typeId > rightFrag.typeId) return false;
+        auto ret = leftFrag[0].case(
+            int leftInt: rightFrag[0].case(
+                int rightInt: leftInt - rightInt,
+                char: die,
+                :empty: die),
+            char leftChar: rightFrag[0].case(
+                int: die,
+                char rightChar: cast(int) leftChar - cast(int) rightChar,
+                :empty: die),
+            :empty: 1);
+        if (ret < 0) return true;
+        if (ret > 0) return false;
+        left = leftFrag.rest;
+        right = rightFrag.rest;
+    }
+}
+
+unittest {
+    assert("foo".naturalSmaller("fob"));
+    assert("foo 3 bar".naturalSmaller("foo 12 bar"));
+}
+
+bool isDigit(char c) return c >= "0"[0] && c <= "9"[0];
+
+struct DirEntry
+{
+    string name;
+    (:file | :dir) type;
+}
+
+DirEntry convert(dirent* ep) {
+    if (!ep) return DirEntry("", :file);
+    (:file | :dir) type((:file | :dir) a) return a;
+    return DirEntry((cast(char*) &ep.d_name).cToString, type(:dir) if ep.d_type == DT_DIR else type(:file));
+}
+
+auto readDir(string path) {
+    struct Iterator {
+        DIR* dp;
+        dirent* ep;
+        DirEntry front;
+        bool empty() { return !ep; }
+        Iterator next() {
+            auto nextEp = readdir(dp);
+            if (!nextEp) closedir(dp);
+            auto res = Iterator(dp, nextEp, convert(nextEp));
+            if (res.front.name == "." || res.front.name == "..") return res.next;
+            return res;
+        }
+    }
+
+    auto dp = opendir(path.toStringz);
+    auto ep = readdir(dp);
+    return Iterator(dp, ep, convert(ep));
+}
+
+bottom die() {
+    print("logic error");
+    exit(1);
+}
