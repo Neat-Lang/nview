@@ -18,10 +18,8 @@ void main(string[] args) {
     for (entry in args[1].readDir) {
         auto path = "$(args[1])/$(entry.name)";
         paths ~= path;
-        print(path);
     }
     paths = paths.sort((a, b) => naturalSmaller(a, b));
-    print("$(paths)");
     gtk_init(null, null);
 
     auto loader = new LazyPixbufLoader;
@@ -59,7 +57,7 @@ void main(string[] args) {
     window.add(gridScroll);
     g_object_ref(cast(void*) gridScroll);
 
-    auto app = new Application(thumbSize=128, pic, grid, gridScroll);
+    auto app = new Application(thumbSize=200, pic, grid, gridEventBox, gridScroll);
 
     connectSignal1!(GdkEventButton*)(gridEventBox, "button-press-event", &app.resolveClick);
     window.setDefaultSize(app.width, app.height);
@@ -128,6 +126,7 @@ class Application {
     int thumbSize;
     Image image;
     Grid grid;
+    EventBox gridEventBox;
     ScrolledWindow gridScroll;
 
     FileEntry[] files;
@@ -135,7 +134,7 @@ class Application {
     bool fullscreen;
     int width, height;
     int columns;
-    this(this.thumbSize, this.image, this.grid, this.gridScroll) {
+    this(this.thumbSize, this.image, this.grid, this.gridEventBox, this.gridScroll) {
         this.width = 600;
         this.height = 500;
     }
@@ -160,11 +159,15 @@ class Application {
     }
     void updateImage() {
         assert(fullscreen);
-        print("select $(files[current].path)");
+        // print("select $(files[current].path)");
         auto pixbuf = loadPixbuf(files[current].path, width, height);
         // FIXME
         if (cast(void*) pixbuf) {
+            auto old = image.get_pixbuf;
             image.setFromPixbuf(pixbuf);
+            if (cast(void*) old) {
+                g_object_unref(cast(void*) old);
+            }
         }
     }
     void resolveClick(GdkEventButton* button) {
@@ -179,19 +182,23 @@ class Application {
         int newColumns = width / (thumbSize + 10);
         if (columns == newColumns) return;
         if (columns != 0) {
-            for (file in files) {
-                grid.remove(file.frame);
-            }
+            for (int i in 0 .. columns)
+                grid.removeColumn(columns - 1 - i);
+            /*gridEventBox.remove(grid);
+            grid = Grid.new;
+            grid.setRowHomogeneous(true);
+            gridEventBox.add(grid);*/
         }
         columns = newColumns;
         mut int row = 0, col = 0;
         for (file in files) {
             grid.attach(file.frame, left=col, top=row, width=1, height=1);
-            if (++col == newColumns) {
+            if (++col == columns) {
                 col = 0;
                 ++row;
             }
         }
+        gridEventBox.showAll;
     }
     void next() {
         setCurrent((current + 1) % cast(int) files.length);
@@ -302,22 +309,23 @@ Pixbuf loadPixbuf(string path, int width, int height) {
         preserve_aspect_ratio=true, null);
 }
 
-bool naturalSmaller(mut string left, mut string right) {
+bool naturalSmaller(string left, string right) {
     int offsetLeft = 0, offsetRight = 0;
-    alias Fragment = ((int | char | :empty), string rest);
-    Fragment getFragment(mut string s) {
-        if (s.empty) return (:empty, "");
-        if (!s.front.isDigit) return (s.front, s[1 .. $]);
+    alias Fragment = ((int | char | :empty), int newOffset);
+    Fragment getFragment(string s, mut int offset) {
+        if (offset == s.length) return (:empty, cast(int) s.length);
+        if (!s[offset].isDigit) return (s[offset], offset + 1);
         mut int numRes = 0;
-        while (!s.empty && s.front.isDigit) {
-            numRes = numRes * 10 + s.front - "0"[0];
-            s = s.next;
+        while (offset != s.length && s[offset].isDigit) {
+            numRes = numRes * 10 + s[offset] - "0"[0];
+            offset++;
         }
-        return (numRes, s);
+        return (numRes, offset);
     }
     int typeId(Fragment fragment) return fragment[0].case(:empty: 0, int: 1, char: 2);
+    mut int leftOffs = 0, rightOffs = 0;
     while (true) {
-        auto leftFrag = left.getFragment, rightFrag = right.getFragment;
+        auto leftFrag = left.getFragment(leftOffs), rightFrag = right.getFragment(rightOffs);
         if (leftFrag.typeId < rightFrag.typeId) return true;
         if (leftFrag.typeId > rightFrag.typeId) return false;
         auto ret = leftFrag[0].case(
@@ -332,8 +340,8 @@ bool naturalSmaller(mut string left, mut string right) {
             :empty: 1);
         if (ret < 0) return true;
         if (ret > 0) return false;
-        left = leftFrag.rest;
-        right = rightFrag.rest;
+        leftOffs = leftFrag.newOffset;
+        rightOffs = rightFrag.newOffset;
     }
 }
 
