@@ -4,7 +4,7 @@
     "main": "src/app.nt",
     "binary": "nview",
     "dependencies": {
-        "gtk": ">=0.0.4"
+        "gtk": ">=0.0.5"
     },
     "sources": {
         "gtk": "https://github.com/neat-lang/gtk"
