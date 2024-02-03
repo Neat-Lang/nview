@@ -1,16 +1,15 @@
 module app;
 
-macro import gtk;
 macro import std.macro.assert;
 macro import std.macro.cimport;
 
+import gtk;
 import c_header("dirent.h");
-import c_header("gdk/gdkkeysyms.h");
+import c_header("gtk-3.0/gdk/gdkkeysyms.h");
 import std.algorithm;
 import std.stdio;
 import std.string;
 import std.thread;
-import gtk;
 
 void main(string[] args) {
     if (args.length == 1) return;
@@ -37,7 +36,11 @@ void main(string[] args) {
         GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
 
     auto window = Window.new(GTK_WINDOW_TOPLEVEL);
-    window.setTitle("nview");
+    window.setTitle("nview - $(args[1])".toStringz);
+    window.maximize;
+    window.showAll;
+
+    gtk_main_iteration;
 
     auto pic = Image.new;
 
@@ -115,9 +118,9 @@ void main(string[] args) {
         if (event.keyval == GDK_KEY_Up) app.up;
         if (event.keyval == GDK_KEY_Down) app.down;
     }
-    connectSignal0(window, "destroy", &quit);
-    connectSignal1!(GdkEventKey*)(window, "key-press-event", &keypress);
-    connectSignal1!(GdkEventConfigure*)(window, "configure-event", &configure);
+    connectSignal0(window, "destroy", new &quit);
+    connectSignal1!(GdkEventKey*)(window, "key-press-event", new &keypress);
+    connectSignal1!(GdkEventConfigure*)(window, "configure-event", new &configure);
 
     gtk_main;
 }
@@ -129,11 +132,11 @@ class Application {
     EventBox gridEventBox;
     ScrolledWindow gridScroll;
 
-    FileEntry[] files;
-    int current;
-    bool fullscreen;
-    int width, height;
-    int columns;
+    mut FileEntry[] files;
+    mut int current;
+    mut bool fullscreen;
+    mut int width, height;
+    mut int columns;
     this(this.thumbSize, this.image, this.grid, this.gridEventBox, this.gridScroll) {
         this.width = 600;
         this.height = 500;
@@ -148,8 +151,8 @@ class Application {
         if (fullscreen) updateImage;
         else with (files[this.current]) {
             frame.getStyleContext.addClass("selected");
-            GtkAllocation frameRect; frame.getAllocation(&frameRect);
-            GtkAllocation viewRect; gridScroll.getAllocation(&viewRect);
+            mut GtkAllocation frameRect; frame.getAllocation(&frameRect);
+            mut GtkAllocation viewRect; gridScroll.getAllocation(&viewRect);
             auto adjustment = gridScroll.getVAdjustment;
             if (frameRect.y < adjustment.getValue)
                 adjustment.setValue(frameRect.y);
@@ -172,7 +175,7 @@ class Application {
     }
     void resolveClick(GdkEventButton* button) {
         for (file in files) {
-            GtkAllocation allocation;
+            mut GtkAllocation allocation;
             file.frame.getAllocation(&allocation);
             if (button.clickedOn(allocation))
                 file.select;
@@ -220,7 +223,7 @@ class FileEntry {
     int offset;
     Widget frame;
     Image image;
-    Pixbuf pixbuf;
+    mut Pixbuf pixbuf;
     this(this.path, this.app, this.offset, this.frame, this.image) {}
     void select() {
         print("select $offset");
@@ -251,7 +254,7 @@ string filename(string path) {
 alias GTK_STYLE_PROVIDER_PRIORITY_APPLICATION = 600;
 
 class LazyPixbufLoader {
-    (Pixbuf | :loading, FileEntry target)[string] pixbufs;
+    mut (Pixbuf | :loading, FileEntry target)[string] pixbufs;
     ThreadPool threadPool;
     Mutex mutex;
     this() {
